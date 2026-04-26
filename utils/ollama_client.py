@@ -143,6 +143,9 @@ class OllamaClient:
             logger.warning(f"Circuit breaker OPEN for {model} — returning empty string")
             return ""
 
+        cfg = get_config()
+        timeout_secs: int = getattr(cfg, "ollama_timeout", 30)
+
         payload: Dict[str, Any] = {
             "model": model,
             "prompt": prompt,
@@ -157,10 +160,11 @@ class OllamaClient:
             try:
                 start = time.monotonic()
                 client = await self._get_client()
-                resp = await client.post(
-                    f"{self.base_url}/api/generate",
-                    json=payload,
-                )
+                async with asyncio.timeout(timeout_secs):
+                    resp = await client.post(
+                        f"{self.base_url}/api/generate",
+                        json=payload,
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 response_text = data.get("response", "")
@@ -169,6 +173,14 @@ class OllamaClient:
                 breaker.record_success()
                 return response_text
 
+            except TimeoutError as e:
+                last_error = e
+                breaker.record_failure()
+                logger.warning(
+                    f"Ollama [{model}] attempt {attempt}/{max_retries} timed out after {timeout_secs}s"
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(2 ** attempt)
             except (httpx.ConnectError, httpx.TimeoutException) as e:
                 last_error = e
                 breaker.record_failure()

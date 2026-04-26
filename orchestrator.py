@@ -18,6 +18,7 @@ from agents.risk_banker import RiskAssessment
 from agents.technical import TechnicalSignal
 from config import get_config
 from database import log_agent_decision
+from utils.security import sanitize_lesson, sanitize_for_prompt
 
 
 # ── Orchestrator Output Schema ─────────────────────────────────────────────────
@@ -117,13 +118,20 @@ class OrchestratorAgent(BaseAgent):
         # ── Build Critic Memory Context ───────────────────────────────────
         memory_context = ""
         if self._critic:
-            memory_context = self._critic.get_memory_context(limit=5)
+            raw_memory = self._critic.get_memory_context(limit=5)
+            # Sanitize each lesson line to prevent prompt injection via DB-stored lessons.
+            sanitized_lines = [
+                sanitize_lesson(line) for line in raw_memory.splitlines()
+            ]
+            memory_context = "\n".join(sanitized_lines)
 
         # ── Construct LLM Prompt ──────────────────────────────────────────
+        # Sanitize free-text fields that could carry prompt-injection payloads
+        # (these come from LLM outputs of sub-agents stored in Pydantic objects).
         fund_str = "UNAVAILABLE" if fundamental is None else (
             f"Sentiment: {fundamental.sentiment} (score: {fundamental.score:+.3f})\n"
-            f"  Reason: {fundamental.reason}\n"
-            f"  Key events: {', '.join(fundamental.key_events) if fundamental.key_events else 'none'}"
+            f"  Reason: {sanitize_for_prompt(fundamental.reason, max_len=200)}\n"
+            f"  Key events: {', '.join(sanitize_for_prompt(e, max_len=80) for e in fundamental.key_events) if fundamental.key_events else 'none'}"
         )
 
         tech_str = "UNAVAILABLE" if technical is None else (
@@ -131,7 +139,7 @@ class OrchestratorAgent(BaseAgent):
             f"  EMA50: {technical.ema_50:.5f} | EMA200: {technical.ema_200:.5f}\n"
             f"  RSI: {technical.rsi:.1f} | MACD_hist: {technical.macd_histogram:.7f}\n"
             f"  ATR: {technical.atr:.6f}\n"
-            f"  Reason: {technical.reason}"
+            f"  Reason: {sanitize_for_prompt(technical.reason, max_len=200)}"
         )
 
         price_str = f"Current price: {snapshot.mid:.5f} | Spread: {snapshot.spread_pips:.1f} pips" if snapshot else "Price unavailable"

@@ -1,18 +1,44 @@
 """
 data/news_fetcher.py — News sentiment + economic calendar with HIGH IMPACT detection.
 Primary: Yahoo Finance news scraper.
-Calendar: Mock (hardcoded 2025-2026 dates) + extensible for live APIs.
+Calendar: Dynamic (calculated algorithmically) via utils.economic_calendar.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import yfinance as yf
 
 from utils.logger import get_logger
+
+# Dynamic calendar — imported with fallback for parallel-agent scenarios
+try:
+    from utils.economic_calendar import (
+        get_active_no_trade_windows,
+        get_upcoming_events,
+        get_todays_events,
+    )
+except ImportError:
+    # Fallback stubs if utils.economic_calendar is not yet available
+    def get_active_no_trade_windows(now=None):  # type: ignore[misc]
+        return []
+
+    def get_upcoming_events(days_ahead: int = 7, ref_datetime=None):  # type: ignore[misc]
+        return []
+
+    def get_todays_events(now=None):  # type: ignore[misc]
+        return []
+
+# Sanitization — imported with inline fallback
+try:
+    from utils.security import sanitize_for_prompt as _sanitize
+except ImportError:
+    def _sanitize(text: str, max_len: int = 300) -> str:  # type: ignore[misc]
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', str(text or ''))
+        return text[:max_len]
 
 logger = get_logger("news_fetcher")
 
@@ -73,59 +99,6 @@ class NewsAnalysis:
     no_trade_reason: str = ""
 
 
-# ── Calendar (Mock) ────────────────────────────────────────────────────────────
-
-def _build_mock_calendar() -> List[CalendarEvent]:
-    """
-    Pre-populated 2026 economic calendar events (HIGH impact).
-    Extend or replace with a live calendar API (e.g., ForexFactory, Investing.com).
-    """
-    events = []
-    # NFP: First Friday of each month at 13:30 UTC
-    nfp_dates_2026 = [
-        datetime(2026, 1, 2, 13, 30, tzinfo=timezone.utc),
-        datetime(2026, 2, 6, 13, 30, tzinfo=timezone.utc),
-        datetime(2026, 3, 6, 13, 30, tzinfo=timezone.utc),
-        datetime(2026, 4, 3, 13, 30, tzinfo=timezone.utc),
-        datetime(2026, 5, 1, 13, 30, tzinfo=timezone.utc),
-        datetime(2026, 6, 5, 13, 30, tzinfo=timezone.utc),
-    ]
-    for d in nfp_dates_2026:
-        events.append(CalendarEvent("Non-Farm Payrolls (NFP)", d, "HIGH", "USD"))
-
-    # FOMC meetings (approx)
-    fomc_dates = [
-        datetime(2026, 1, 28, 19, 0, tzinfo=timezone.utc),
-        datetime(2026, 3, 18, 19, 0, tzinfo=timezone.utc),
-        datetime(2026, 5, 6, 19, 0, tzinfo=timezone.utc),
-    ]
-    for d in fomc_dates:
-        events.append(CalendarEvent("FOMC Rate Decision", d, "HIGH", "USD"))
-
-    # ECB meetings (approx)
-    ecb_dates = [
-        datetime(2026, 1, 22, 13, 15, tzinfo=timezone.utc),
-        datetime(2026, 3, 5, 13, 15, tzinfo=timezone.utc),
-        datetime(2026, 4, 30, 13, 15, tzinfo=timezone.utc),
-    ]
-    for d in ecb_dates:
-        events.append(CalendarEvent("ECB Rate Decision", d, "HIGH", "EUR"))
-
-    # US CPI (approx 2nd Tuesday each month)
-    cpi_dates = [
-        datetime(2026, 1, 14, 13, 30, tzinfo=timezone.utc),
-        datetime(2026, 2, 11, 13, 30, tzinfo=timezone.utc),
-        datetime(2026, 3, 11, 12, 30, tzinfo=timezone.utc),
-    ]
-    for d in cpi_dates:
-        events.append(CalendarEvent("US CPI (Inflation)", d, "HIGH", "USD"))
-
-    return events
-
-
-_MOCK_CALENDAR = _build_mock_calendar()
-
-
 # ── Sentiment Scoring ──────────────────────────────────────────────────────────
 
 def _score_text(text: str) -> float:
@@ -157,9 +130,13 @@ def fetch_yahoo_news(symbols: List[str] = None) -> List[NewsItem]:
             ticker = yf.Ticker(sym)
             raw_news = ticker.news or []
             for n in raw_news[:5]:  # Limit to 5 per symbol
-                title = n.get("content", {}).get("title", "") or n.get("title", "")
-                summary = n.get("content", {}).get("summary", "") or n.get("summary", "")
+                raw_title = n.get("content", {}).get("title", "") or n.get("title", "")
+                raw_summary = n.get("content", {}).get("summary", "") or n.get("summary", "")
                 pub_raw = n.get("content", {}).get("pubDate", "") or n.get("pubDate", "")
+
+                # Sanitize before storing
+                title = _sanitize(raw_title, max_len=200)
+                summary = _sanitize(raw_summary, max_len=400)
 
                 try:
                     if isinstance(pub_raw, (int, float)):
@@ -175,7 +152,7 @@ def fetch_yahoo_news(symbols: List[str] = None) -> List[NewsItem]:
 
                 items.append(NewsItem(
                     title=title,
-                    summary=summary[:300],
+                    summary=summary,
                     published=pub_dt,
                     source=f"yahoo/{sym}",
                     sentiment_score=score,
@@ -190,28 +167,19 @@ def fetch_yahoo_news(symbols: List[str] = None) -> List[NewsItem]:
 
 
 def check_high_impact_window(
-    calendar: List[CalendarEvent] = None,
-    buffer_minutes: int = HIGH_IMPACT_BUFFER_MINUTES,
+    calendar: List[CalendarEvent] = None,  # noqa: ARG001 — kept for API compatibility
+    buffer_minutes: int = HIGH_IMPACT_BUFFER_MINUTES,  # noqa: ARG001 — window defined per-event
 ) -> tuple[bool, str]:
     """
     Check if current time is within the no-trade buffer of any HIGH impact event.
+    Uses the dynamic economic calendar. `calendar` and `buffer_minutes` parameters
+    are retained for API compatibility but ignored — per-event windows apply.
     Returns (in_window, description).
     """
-    if calendar is None:
-        calendar = _MOCK_CALENDAR
-
-    now = datetime.now(timezone.utc)
-    buffer = timedelta(minutes=buffer_minutes)
-
-    for evt in calendar:
-        if evt.impact != "HIGH":
-            continue
-        if (evt.datetime_utc - buffer) <= now <= (evt.datetime_utc + buffer):
-            mins_to_event = int((evt.datetime_utc - now).total_seconds() / 60)
-            direction = "before" if mins_to_event > 0 else "after"
-            desc = f"{evt.name} ({abs(mins_to_event)} min {direction})"
-            return True, desc
-
+    active_windows = get_active_no_trade_windows()
+    if active_windows:
+        desc = ", ".join(e.name for e in active_windows)
+        return True, f"No-trade window: {desc}"
     return False, ""
 
 
@@ -221,17 +189,22 @@ class NewsFetcher:
     """
     Unified news + calendar analyzer.
     Enforces NO-TRADE window around HIGH IMPACT events.
+    Calendar dates are calculated dynamically — no hardcoded specific dates.
     """
 
-    def __init__(self):
-        self._calendar = _MOCK_CALENDAR
-
     def analyze(self) -> NewsAnalysis:
-        # 1. Fetch news
+        # 1. Fetch and sanitize news
         news = fetch_yahoo_news()
 
-        # 2. Check high-impact calendar window
-        in_window, window_desc = check_high_impact_window(self._calendar)
+        # 2. Check high-impact calendar window (dynamic)
+        now = datetime.now(timezone.utc)
+        active_windows = get_active_no_trade_windows(now)
+        no_trade_window = bool(active_windows)
+        no_trade_reason = ""
+        if active_windows:
+            no_trade_reason = (
+                f"No-trade window: {', '.join(e.name for e in active_windows)}"
+            )
 
         # 3. Aggregate sentiment
         if news:
@@ -240,13 +213,18 @@ class NewsFetcher:
         else:
             avg_sentiment = 0.0
 
-        has_high_impact = any(n.is_high_impact for n in news) or in_window
+        has_high_impact = any(n.is_high_impact for n in news) or no_trade_window
 
-        # 4. Upcoming events (next 24h)
-        now = datetime.now(timezone.utc)
-        upcoming = [
-            e for e in self._calendar
-            if now <= e.datetime_utc <= now + timedelta(hours=24) and e.impact == "HIGH"
+        # 4. Upcoming events (next 3 days) — converted to CalendarEvent for compatibility
+        upcoming_eco = get_upcoming_events(days_ahead=3, ref_datetime=now)
+        upcoming: List[CalendarEvent] = [
+            CalendarEvent(
+                name=e.name,
+                datetime_utc=e.event_datetime,
+                impact=e.impact,
+                currency=e.currency,
+            )
+            for e in upcoming_eco
         ]
 
         return NewsAnalysis(
@@ -254,9 +232,13 @@ class NewsFetcher:
             calendar_events=upcoming,
             sentiment_score=avg_sentiment,
             has_high_impact_event=has_high_impact,
-            high_impact_description=window_desc if in_window else (
+            high_impact_description=no_trade_reason if no_trade_window else (
                 f"Upcoming: {upcoming[0].name}" if upcoming else ""
             ),
-            no_trade_window=in_window,
-            no_trade_reason=window_desc if in_window else "",
+            no_trade_window=no_trade_window,
+            no_trade_reason=no_trade_reason,
         )
+
+    def get_calendar_events_today(self) -> list[dict]:
+        """Returns today's economic events as dicts for dashboard display."""
+        return get_todays_events()

@@ -21,6 +21,7 @@ from sqlalchemy import (
     Text,
     create_engine,
     event,
+    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -123,6 +124,19 @@ class SystemEvent(Base):
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class DynamicParam(Base):
+    __tablename__ = "dynamic_params"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    param_name = Column(String(100), unique=True, nullable=False, index=True)
+    param_value = Column(Float, nullable=False)
+    param_type = Column(String(20), default="float")
+    description = Column(String(300))
+    updated_by = Column(String(50), default="system")
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    change_reason = Column(String(300))
+
+
 # ── Engine & Session ─────────────────────────────────────────────────────────
 
 _engine = None
@@ -151,6 +165,7 @@ def get_engine():
 def init_db() -> None:
     """Create all tables if they don't exist."""
     Base.metadata.create_all(get_engine())
+    seed_dynamic_params()
 
 
 def get_session() -> Session:
@@ -281,3 +296,84 @@ def get_todays_trades() -> List[Dict]:
             .all()
         )
         return [t.to_dict() for t in trades]
+
+
+# ── Dynamic Parameters ────────────────────────────────────────────────────────
+
+# Parámetros iniciales del sistema
+INITIAL_DYNAMIC_PARAMS: dict[str, tuple[float, str]] = {
+    "sl_multiplier":                (1.5,  "ATR multiplier for stop loss"),
+    "tp_multiplier":                (2.5,  "ATR multiplier for take profit"),
+    "min_confidence_threshold":     (0.65, "Minimum orchestrator confidence to execute"),
+    "rsi_overbought":               (70.0, "RSI overbought threshold"),
+    "rsi_oversold":                 (30.0, "RSI oversold threshold"),
+    "technical_strength_threshold": (0.65, "Minimum technical strength to trigger signal"),
+    "session_quality_threshold":    (0.5,  "Minimum session quality to trade"),
+}
+
+
+def get_dynamic_param(param_name: str, default: float) -> float:
+    """Returns current value of a dynamic parameter, or default if not found."""
+    try:
+        with get_session() as session:
+            param = session.query(DynamicParam).filter(
+                DynamicParam.param_name == param_name
+            ).first()
+            return param.param_value if param else default
+    except Exception:
+        return default
+
+
+def set_dynamic_param(
+    param_name: str,
+    value: float,
+    reason: str,
+    updated_by: str = "critic",
+) -> None:
+    """Upsert a dynamic parameter with change tracking."""
+    with get_session() as session:
+        param = session.query(DynamicParam).filter(
+            DynamicParam.param_name == param_name
+        ).first()
+        if param:
+            param.param_value = value
+            param.change_reason = reason
+            param.updated_by = updated_by
+        else:
+            param = DynamicParam(
+                param_name=param_name,
+                param_value=value,
+                change_reason=reason,
+                updated_by=updated_by,
+                description=INITIAL_DYNAMIC_PARAMS.get(param_name, (value, ""))[1],
+            )
+            session.add(param)
+        session.commit()
+
+
+def seed_dynamic_params() -> None:
+    """Seed initial params if they don't exist (idempotent)."""
+    with get_session() as session:
+        for name, (value, description) in INITIAL_DYNAMIC_PARAMS.items():
+            exists = session.query(DynamicParam).filter(
+                DynamicParam.param_name == name
+            ).first()
+            if not exists:
+                session.add(DynamicParam(
+                    param_name=name,
+                    param_value=value,
+                    description=description,
+                    updated_by="system",
+                    change_reason="Initial seed",
+                ))
+        session.commit()
+
+
+def get_all_dynamic_params() -> dict[str, float]:
+    """Returns all dynamic params as a dict."""
+    try:
+        with get_session() as session:
+            params = session.query(DynamicParam).all()
+            return {p.param_name: p.param_value for p in params}
+    except Exception:
+        return {name: val for name, (val, _) in INITIAL_DYNAMIC_PARAMS.items()}

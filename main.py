@@ -121,6 +121,7 @@ class TradingEngine:
         self.orchestrator = OrchestratorAgent(self.cfg, critic=self.critic_agent)
         self.dashboard = Dashboard(refresh_seconds=5.0)
         self.alerts = AlertDispatcher()
+        self.last_cycle_ts: Optional[datetime] = None
 
         logger.info(f"Trading Engine initialized | Mode: {self.cfg.trading_mode.value} | Broker: {broker.broker_name}")
 
@@ -362,6 +363,21 @@ async def main() -> None:
     if not args.no_dashboard:
         engine.dashboard.start()
 
+    # ── Start Web API Server ───────────────────────────────────────────────
+    if cfg.api_enabled:
+        try:
+            from api.server import start_api_server
+            start_api_server(
+                host=cfg.api_host,
+                port=cfg.api_port,
+                alerts_dispatcher=engine.alerts,
+            )
+            console.print(
+                f"[bold cyan]Web dashboard:[/] http://{cfg.api_host}:{cfg.api_port}"
+            )
+        except Exception as _api_err:
+            logger.warning(f"API server failed to start: {_api_err}")
+
     # ── DB Backup Scheduler ───────────────────────────────────────────────
     schedule.every(cfg.db_backup_interval_hours).hours.do(backup_database)
 
@@ -379,6 +395,8 @@ async def main() -> None:
     console.print(f"\n[bold green]System started | Interval: {interval}min | Mode: {cfg.trading_mode.value}[/]\n")
     log_system_event("SYSTEM_START", f"Mode={cfg.trading_mode.value} broker={broker.broker_name}")
 
+    CYCLE_TIMEOUT = 300  # 5 minutes — if a cycle hangs longer, it is a system error
+
     try:
         if args.dry_run:
             console.print("[cyan]DRY RUN — single cycle, no orders placed[/]")
@@ -387,7 +405,13 @@ async def main() -> None:
             return
 
         while not engine._shutdown.is_set():
-            await engine.run_cycle()
+            try:
+                async with asyncio.timeout(CYCLE_TIMEOUT):
+                    await engine.run_cycle()
+                    engine.last_cycle_ts = datetime.now(timezone.utc)
+            except TimeoutError:
+                logger.critical("TRADING CYCLE TIMED OUT after 300s — possible system hang")
+                engine.alerts.critical("Trading cycle timed out — possible system hang")
             schedule.run_pending()
             # Sleep in small chunks so shutdown signal is responsive
             for _ in range(interval * 60 // 5):

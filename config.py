@@ -8,7 +8,7 @@ import os
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator
@@ -104,6 +104,22 @@ class SystemConfig(BaseSettings):
     # ── Trading Symbol ────────────────────────────────────
     trading_symbol: str = Field(default="EUR_USD", alias="TRADING_SYMBOL")
     trading_interval_minutes: int = Field(default=15, alias="TRADING_INTERVAL_MINUTES")
+
+    # ── API Server ────────────────────────────────────────
+    api_enabled: bool = Field(default=True, description="Enable the web dashboard API", alias="API_ENABLED")
+    api_host: str = Field(default="0.0.0.0", alias="API_HOST")
+    api_port: int = Field(default=8080, alias="API_PORT")
+
+    # ── Trading Cycle ─────────────────────────────────────
+    cycle_interval_seconds: int = Field(default=300, description="Seconds between trading cycles", alias="CYCLE_INTERVAL_SECONDS")
+    cycle_timeout_seconds: int = Field(default=300, description="Max cycle duration before watchdog fires", alias="CYCLE_TIMEOUT_SECONDS")
+
+    # ── Multi-pair ────────────────────────────────────────
+    additional_symbols: List[str] = Field(default_factory=list, description="Additional trading symbols", alias="ADDITIONAL_SYMBOLS")
+
+    # ── Backtesting Defaults ──────────────────────────────
+    backtest_default_start: str = Field(default="2024-01-01", alias="BACKTEST_DEFAULT_START")
+    backtest_default_end: str = Field(default="2024-12-31", alias="BACKTEST_DEFAULT_END")
 
     @field_validator("risk_per_trade_pct")
     @classmethod

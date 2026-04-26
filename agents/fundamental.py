@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 from agents.base_agent import BaseAgent
 from config import get_config
 from data.news_fetcher import NewsAnalysis, NewsFetcher
+from utils.security import sanitize_for_prompt
 
 
 # ── Output Schema ──────────────────────────────────────────────────────────────
@@ -79,8 +80,12 @@ class FundamentalAgent(BaseAgent):
             )
 
         # 3. Build prompt for Mistral
+        # Sanitize titles and sources before injecting into the LLM prompt
+        # to prevent prompt-injection attacks via crafted news content.
         recent_headlines = "\n".join([
-            f"- [{n.source}] {n.title} (sentiment: {n.sentiment_score:+.2f})"
+            f"- [{sanitize_for_prompt(n.source, max_len=50)}] "
+            f"{sanitize_for_prompt(n.title, max_len=200)} "
+            f"(sentiment: {n.sentiment_score:+.2f})"
             for n in news_analysis.news_items[:8]
         ]) or "No recent news available."
 
