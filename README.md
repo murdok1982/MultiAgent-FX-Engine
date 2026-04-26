@@ -198,7 +198,21 @@ Este proyecto se distribuye bajo la licencia **MIT** y es completamente **gratui
 
 Si este sistema te resulta útil para tu aprendizaje, investigación o proyectos personales/comerciales, **agradeceríamos enormemente una donación**. Tu apoyo ayuda a mantener estos proyectos de código abierto activos, pagar servidores de prueba y continuar investigando en Inteligencia Artificial aplicada.
 
-💖 **[Apoyar el Proyecto / Donaciones en mi perfil de GitHub] (Añadir link de sponsor o paypal aquí)**
+### Bitcoin
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃  ₿  Bitcoin Donation Address  ₿   ┃
+┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+┃                                   ┃
+┃   bc1qqphwht25vjzlptwzjyjt3sex    ┃
+┃   7e3p8twn390fkw                  ┃
+┃                                   ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+**Red:** Bitcoin (BTC)
+**Dirección:** `bc1qqphwht25vjzlptwzjyjt3sex7e3p8twn390fkw`
+
+*Copia la dirección arriba indicada en tu wallet preferida.*
 
 ---
 <div align="center">
