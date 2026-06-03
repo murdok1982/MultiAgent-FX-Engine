@@ -137,6 +137,22 @@ class DynamicParam(Base):
     change_reason = Column(String(300))
 
 
+class RoyaltyObligation(Base):
+    """Commercial-license royalty accruals (per LICENSE-COMMERCIAL.md)."""
+    __tablename__ = "royalty_obligations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_id = Column(String(64), index=True)
+    net_pnl = Column(Float, nullable=False)
+    royalty_amount = Column(Float, nullable=False)   # in account currency
+    chain = Column(String(16))                       # ethereum | polygon | bitcoin | ...
+    wallet = Column(String(80))                      # author payout address
+    transferred = Column(Boolean, default=False)
+    tx_hash = Column(String(120))
+    error = Column(String(300))
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 # ── Engine & Session ─────────────────────────────────────────────────────────
 
 _engine = None

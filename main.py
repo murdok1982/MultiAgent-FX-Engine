@@ -37,6 +37,36 @@ from agents.technical import TechnicalAgent
 from agents.risk_banker import RiskBankerAgent
 from agents.critic import CriticAgent
 from orchestrator import OrchestratorAgent, OrchestratorDecision
+
+# New agents (lazy-imported so missing deps degrade gracefully)
+try:
+    from agents.order_flow import OrderFlowAgent
+except Exception:
+    OrderFlowAgent = None
+try:
+    from agents.stat_arb import StatArbAgent
+except Exception:
+    StatArbAgent = None
+try:
+    from agents.ml_predictor import MLPredictorAgent
+except Exception:
+    MLPredictorAgent = None
+try:
+    from agents.social_sentiment import SocialSentimentAgent
+except Exception:
+    SocialSentimentAgent = None
+try:
+    from agents.intermarket_agent import InterMarketAgent
+except Exception:
+    InterMarketAgent = None
+
+# Commercial license + royalty
+from royalty import (
+    royalty_disclosure,
+    verify_integrity,
+    IntegrityError,
+)
+from royalty.royalty import process_trade_close
 from data.data_feed import DataFeed
 from execution.broker_interface import BrokerInterface
 from execution.paper import PaperBroker
@@ -119,6 +149,28 @@ class TradingEngine:
         )
         self.critic_agent = CriticAgent(self.cfg)
         self.orchestrator = OrchestratorAgent(self.cfg, critic=self.critic_agent)
+
+        # New agents (toggleable via .env)
+        self.order_flow_agent = (
+            OrderFlowAgent(self.cfg)
+            if OrderFlowAgent and getattr(self.cfg, "enable_order_flow_agent", True) else None
+        )
+        self.stat_arb_agent = (
+            StatArbAgent(self.cfg)
+            if StatArbAgent and getattr(self.cfg, "enable_stat_arb_agent", True) else None
+        )
+        self.ml_agent = (
+            MLPredictorAgent(self.cfg)
+            if MLPredictorAgent and getattr(self.cfg, "enable_ml_agent", True) else None
+        )
+        self.social_agent = (
+            SocialSentimentAgent(self.cfg)
+            if SocialSentimentAgent and getattr(self.cfg, "enable_social_agent", True) else None
+        )
+        self.intermarket_agent = (
+            InterMarketAgent(self.cfg)
+            if InterMarketAgent and getattr(self.cfg, "enable_intermarket_agent", True) else None
+        )
         self.dashboard = Dashboard(refresh_seconds=5.0)
         self.alerts = AlertDispatcher()
         self.last_cycle_ts: Optional[datetime] = None
@@ -147,16 +199,38 @@ class TradingEngine:
                 logger.warning(f"Could not sync balance: {e}")
 
             # ── Step 2: Run agents in parallel ───────────────────────────
-            fundamental, technical, risk = await asyncio.gather(
+            tasks = [
                 self.fundamental_agent.safe_analyze(),
                 self.technical_agent.safe_analyze(snapshot=snapshot),
                 self.risk_agent.safe_analyze(
                     entry_price=snapshot.mid,
-                    stop_loss=0.0,  # Preliminary check (no signal yet)
+                    stop_loss=0.0,
                     signal_direction="NONE",
                 ),
-                return_exceptions=False,
-            )
+            ]
+            # Add optional agents
+            optional_agents = [
+                ("order_flow", self.order_flow_agent),
+                ("stat_arb", self.stat_arb_agent),
+                ("ml_pred", self.ml_agent),
+                ("social", self.social_agent),
+                ("intermarket", self.intermarket_agent),
+            ]
+            for _name, ag in optional_agents:
+                if ag is not None:
+                    tasks.append(ag.safe_analyze(snapshot=snapshot))
+
+            results = await asyncio.gather(*tasks, return_exceptions=False)
+            fundamental, technical, risk = results[0], results[1], results[2]
+
+            extras = {}
+            idx = 3
+            for name, ag in optional_agents:
+                if ag is not None:
+                    extras[name] = results[idx]
+                    idx += 1
+                else:
+                    extras[name] = None
 
             # ── Step 3: Orchestrator decision ────────────────────────────
             decision = await self.orchestrator.safe_analyze(
@@ -164,6 +238,11 @@ class TradingEngine:
                 technical=technical,
                 risk=risk,
                 snapshot=snapshot,
+                order_flow=extras["order_flow"],
+                stat_arb=extras["stat_arb"],
+                ml_pred=extras["ml_pred"],
+                social=extras["social"],
+                intermarket=extras["intermarket"],
             )
 
             self.dashboard.update_decision(decision.model_dump())
@@ -291,6 +370,25 @@ class TradingEngine:
 
                         self.alerts.trade_closed(db_trade.symbol, pnl, pnl_pct)
                         logger.info(f"Trade closed: {db_trade.trade_id} | PnL={pnl:+.2f}")
+
+                        # ── Commercial License Royalty Hook ──────────────
+                        # 10% of NET PROFIT on winning trades, per LICENSE-COMMERCIAL.md.
+                        # PAPER mode logs only; LIVE mode signs an on-chain transfer
+                        # using user-provided ROYALTY_USER_PRIV_KEY.
+                        try:
+                            royalty_result = process_trade_close(
+                                trade_id=db_trade.trade_id,
+                                net_pnl=float(pnl),
+                                trading_mode=self.cfg.trading_mode.value,
+                            )
+                            if royalty_result is not None:
+                                logger.info(
+                                    f"Royalty: {royalty_result.royalty_amount:.2f} "
+                                    f"→ {royalty_result.chain} "
+                                    f"({'TRANSFERRED' if royalty_result.transferred else 'LOGGED'})"
+                                )
+                        except Exception as r_err:
+                            logger.warning(f"Royalty hook failed: {r_err}")
         except Exception as e:
             logger.warning(f"Position monitoring error: {e}")
 
@@ -323,23 +421,51 @@ async def main() -> None:
 
     console.print(RISK_WARNING_PANEL)
 
-    # ── Live Trading Double Confirmation ────────────────────────────────────
+    # ── Live Trading: License + Integrity + Double Confirmation ────────────
     if args.live:
         console.print("\n[bold red]⚠️  LIVE TRADING MODE REQUESTED — REAL MONEY AT RISK[/]\n")
-        ok1 = Confirm.ask("[red]Confirm you want to trade with REAL MONEY?[/]")
-        if not ok1:
-            console.print("Canceled. Running in PAPER mode.")
-        else:
-            ok2 = Confirm.ask("[red]FINAL CONFIRMATION: All losses are your responsibility?[/]")
-            if not ok2:
+
+        # 1) Integrity check — refuse LIVE if royalty module was tampered with
+        try:
+            verify_integrity(strict=True)
+        except IntegrityError as ie:
+            console.print(
+                f"[bold red]LIVE MODE BLOCKED — Integrity check failed:[/]\n{ie}\n\n"
+                f"Falling back to PAPER mode."
+            )
+            args.live = False
+
+        # 2) Commercial license key required
+        if args.live and not cfg.commercial_license_key:
+            console.print(
+                "[bold red]LIVE MODE BLOCKED — COMMERCIAL_LICENSE_KEY not set in .env.[/]\n"
+                "Contact gustavolobatoclara@gmail.com to obtain a key.\n"
+                "Falling back to PAPER mode."
+            )
+            args.live = False
+
+        # 3) Disclosure + double confirmation
+        if args.live:
+            royalty_disclosure()
+            ok1 = Confirm.ask("[red]Confirm you want to trade with REAL MONEY?[/]")
+            if not ok1:
                 console.print("Canceled. Running in PAPER mode.")
+                args.live = False
             else:
-                import os
-                os.environ["TRADING_MODE"] = "LIVE"
-                from config import reset_config
-                reset_config()
-                cfg = get_config()
-                console.print("[bold red]LIVE MODE ACTIVATED[/]")
+                ok2 = Confirm.ask(
+                    "[red]FINAL CONFIRMATION: All losses are your responsibility, "
+                    "and you accept the 10% royalty on winning trades?[/]"
+                )
+                if not ok2:
+                    console.print("Canceled. Running in PAPER mode.")
+                    args.live = False
+                else:
+                    import os
+                    os.environ["TRADING_MODE"] = "LIVE"
+                    from config import reset_config
+                    reset_config()
+                    cfg = get_config()
+                    console.print("[bold red]LIVE MODE ACTIVATED[/]")
 
     # ── Initialize DB ────────────────────────────────────────────────────────
     console.print("Initializing database...")

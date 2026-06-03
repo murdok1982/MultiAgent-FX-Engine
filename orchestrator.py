@@ -20,6 +20,28 @@ from config import get_config
 from database import log_agent_decision
 from utils.security import sanitize_lesson, sanitize_for_prompt
 
+# New agent signal types (optional — may be None if disabled)
+try:
+    from agents.order_flow import OrderFlowSignal
+except Exception:
+    OrderFlowSignal = None  # type: ignore
+try:
+    from agents.stat_arb import StatArbSignal
+except Exception:
+    StatArbSignal = None  # type: ignore
+try:
+    from agents.ml_predictor import MLPrediction
+except Exception:
+    MLPrediction = None  # type: ignore
+try:
+    from agents.social_sentiment import SocialSentimentSignal
+except Exception:
+    SocialSentimentSignal = None  # type: ignore
+try:
+    from agents.intermarket_agent import InterMarketSignal
+except Exception:
+    InterMarketSignal = None  # type: ignore
+
 
 # ── Orchestrator Output Schema ─────────────────────────────────────────────────
 
@@ -98,6 +120,11 @@ class OrchestratorAgent(BaseAgent):
         technical: TechnicalSignal = None,
         risk: RiskAssessment = None,
         snapshot=None,
+        order_flow=None,
+        stat_arb=None,
+        ml_pred=None,
+        social=None,
+        intermarket=None,
         **kwargs,
     ) -> OrchestratorDecision:
         cycle_id = str(uuid.uuid4())[:12]
@@ -150,6 +177,30 @@ class OrchestratorAgent(BaseAgent):
             f"  Recommended units: {risk.recommended_units:.0f} | Max loss: {risk.max_loss_this_trade:.2f}"
         )
 
+        # ── Additional Agent Signals ──────────────────────────────────────
+        of_str = "UNAVAILABLE" if order_flow is None else (
+            f"Bias: {order_flow.bias} (conf {order_flow.confluence_score:.2f}) | "
+            f"Struct: {order_flow.structure} | Sweep: {order_flow.liquidity_swept} | "
+            f"Zone: {'PREM' if order_flow.in_premium else 'DISC' if order_flow.in_discount else 'MID'} | "
+            f"POC: {order_flow.poc:.5f}"
+        )
+        sa_str = "UNAVAILABLE" if stat_arb is None else (
+            f"Bias: {stat_arb.bias} | z={stat_arb.z_score:+.2f} | "
+            f"H={stat_arb.hurst:.2f} | MR={stat_arb.is_mean_reverting}"
+        )
+        ml_str = "UNAVAILABLE" if ml_pred is None else (
+            f"Bias: {ml_pred.bias} | p_up={ml_pred.prob_up:.3f} "
+            f"({ml_pred.model_used}) | conf={ml_pred.confidence:.2f}"
+        )
+        soc_str = "UNAVAILABLE" if social is None else (
+            f"Label: {social.label} score={social.score:+.2f} | n={social.sample_size} | "
+            f"contrarian={social.contrarian_bias} | themes={','.join(social.top_themes) if social.top_themes else '—'}"
+        )
+        im_str = "UNAVAILABLE" if intermarket is None else (
+            f"Bias: {intermarket.bias} | macro_score={intermarket.macro_score:+.2f} | "
+            f"regime={intermarket.risk_regime} | DXY 1d {intermarket.dxy_change_1d:+.2f}%"
+        )
+
         prompt = f"""You are the Chief Trader AI for a professional EUR/USD Forex system.
 Your role: synthesize all agent inputs and produce ONE final trading decision.
 
@@ -163,6 +214,21 @@ FUNDAMENTAL ANALYSIS (Mistral:7b):
 TECHNICAL ANALYSIS (Pure Python indicators):
 {tech_str}
 
+ORDER FLOW / SMART MONEY (ICT):
+{of_str}
+
+STAT-ARB MEAN-REVERSION:
+{sa_str}
+
+ML PREDICTOR (XGBoost / LSTM):
+{ml_str}
+
+SOCIAL SENTIMENT (X / Reddit / StockTwits):
+{soc_str}
+
+INTER-MARKET MACRO (DXY / 10Y / Gold / VIX):
+{im_str}
+
 RISK / ACCOUNT STATUS (phi3:medium):
 {risk_str}
 
@@ -175,6 +241,9 @@ DECISION RULES (MANDATORY):
 3. RSI > 75 or < 25 = extra caution required
 4. Low confidence = HOLD (better to miss than lose)
 5. In doubt = HOLD
+6. Reward CONFLUENCE: if Technical + Order Flow + ML + Inter-Market agree → boost confidence
+7. Treat extreme social consensus as a FADE signal (contrarian)
+8. If Stat-Arb says fade (z>2) BUT trend agents say follow → side with trend; only take stat-arb when trend is sideways or weak
 
 Produce exactly this JSON (NO other text):
 {{

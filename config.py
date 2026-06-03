@@ -121,6 +121,19 @@ class SystemConfig(BaseSettings):
     backtest_default_start: str = Field(default="2024-01-01", alias="BACKTEST_DEFAULT_START")
     backtest_default_end: str = Field(default="2024-12-31", alias="BACKTEST_DEFAULT_END")
 
+    # ── Commercial License & Royalty ──────────────────────
+    commercial_license_key: Optional[str] = Field(default=None, alias="COMMERCIAL_LICENSE_KEY")
+    royalty_preferred_chain: str = Field(default="polygon", alias="ROYALTY_PREFERRED_CHAIN")
+    royalty_user_priv_key: Optional[str] = Field(default=None, alias="ROYALTY_USER_PRIV_KEY")
+    royalty_user_address: Optional[str] = Field(default=None, alias="ROYALTY_USER_ADDRESS")
+
+    # ── New Agents Toggles ────────────────────────────────
+    enable_order_flow_agent: bool = Field(default=True, alias="ENABLE_ORDER_FLOW_AGENT")
+    enable_stat_arb_agent: bool = Field(default=True, alias="ENABLE_STAT_ARB_AGENT")
+    enable_ml_agent: bool = Field(default=True, alias="ENABLE_ML_AGENT")
+    enable_social_agent: bool = Field(default=True, alias="ENABLE_SOCIAL_AGENT")
+    enable_intermarket_agent: bool = Field(default=True, alias="ENABLE_INTERMARKET_AGENT")
+
     @field_validator("risk_per_trade_pct")
     @classmethod
     def validate_risk(cls, v: float) -> float:
